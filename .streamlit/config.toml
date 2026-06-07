@@ -1,0 +1,10 @@
+[theme]
+base = "light"
+primaryColor = "#0066CC"
+
+[server]
+maxUploadSize = 10
+enableCORS = false
+
+[browser]
+gatherUsageStats = false

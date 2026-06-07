@@ -1,0 +1,466 @@
+# =============================================================================
+# Retrieval Test Cases for NephroVax RAG
+# =============================================================================
+#
+# Purpose
+# -------
+# Each test case is a clinical question paired with the chunk(s) that should
+# be retrieved to answer it correctly. A runner script feeds each `question`
+# to the RAG retrieval pipeline, looks at the top-K chunks returned, and
+# checks whether the `expected_chunks` appear in the results.
+#
+# This file is the source of truth for "did retrieval work?" — separate from
+# whether the LLM generated a plausible-sounding answer.
+#
+# Relationship to documents.yaml
+# ------------------------------
+# Each test case references a `doc_id` that must match an entry in
+# documents.yaml. The breadcrumb path is the heading hierarchy (H3 onward)
+# inside that document's markdown file — it identifies a single leaf
+# (recommendation block).
+#
+# When breadcrumb paths change (because someone renamed a heading), this
+# file becomes a structural integrity check: failing tests reveal drift
+# between the guideline file and the test cases.
+#
+# Adding new cases
+# ----------------
+# Add cases incrementally as you discover gaps. Aim for at least one case
+# per leaf cluster, plus a few hard cases (multi-chunk, paraphrase, negative).
+# Run the harness; failing cases tell you what to fix in chunker, embedding
+# choice, or retrieval parameters.
+# =============================================================================
+
+schema_version: "1.0"
+
+# -----------------------------------------------------------------------------
+# Evaluation configuration
+# -----------------------------------------------------------------------------
+# These are defaults the runner should use unless overridden per-case.
+
+evaluation_config:
+  retrieval_top_k: 5
+  # Score thresholds for negative cases (out-of-scope queries). If the top
+  # result's similarity score is BELOW this value, the system has correctly
+  # recognized the query as out-of-scope. Calibrate empirically.
+  negative_case_max_score: 0.50
+  metrics:
+    top_1: "Primary expected chunk is the #1 result"
+    top_3: "Primary expected chunk appears in top 3"
+    top_5: "Primary expected chunk appears in top 5"
+    full_coverage_top_5: "All expected_chunks appear in top 5 (for multi-chunk cases)"
+
+# -----------------------------------------------------------------------------
+# Tag taxonomy (reference)
+# -----------------------------------------------------------------------------
+# Use these tags consistently so the runner can slice results by category.
+#
+#   vaccine:        pneumococcal | meningococcal | hib
+#   pathway:        pathway_a | pathway_b
+#   age_cohort:     infant | pediatric | adolescent | adult | elderly | all_ages
+#   terminology:    brand_name | generic_name | mixed
+#   test_type:      standard | complete_series | data_validation
+#                   | cross_document | negative | paraphrase | regional
+#   difficulty:     easy | medium | hard
+
+# -----------------------------------------------------------------------------
+# Test cases
+# -----------------------------------------------------------------------------
+
+test_cases:
+
+  # ===========================================================================
+  # PNEUMOCOCCAL — Pathway A (no/unknown prior vaccination)
+  # ===========================================================================
+
+  - id: pneumo-pa-adult-eculizumab-001
+    description: Baseline — adult initiating eculizumab, no prior pneumo vaccines
+    question: >-
+      A 30-year-old patient just started eculizumab for aHUS. They have never
+      received any pneumococcal vaccines. What should I administer?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway A — No or unknown prior pneumococcal vaccination"
+          - "Age ≥19 years"
+    tags: [pneumococcal, pathway_a, adult, brand_name, standard, easy]
+    notes: |
+      Easiest case. Adult, named complement inhibitor (eculizumab), explicit
+      "never received" history. If this fails, retrieval is broken.
+
+  - id: pneumo-pa-child-ultomiris-002
+    description: Young child starting complement inhibitor, no prior pneumo
+    question: >-
+      A 2-year-old is being initiated on Ultomiris. No prior pneumococcal
+      vaccination is on record. What is the recommended series?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway A — No or unknown prior pneumococcal vaccination"
+          - "Age ≤5 years"
+    tags: [pneumococcal, pathway_a, pediatric, brand_name, standard, easy]
+    notes: |
+      Tests that the retrieval correctly resolves "2-year-old" to the "≤5 years"
+      age band, and "Ultomiris" (ravulizumab brand name) to complement inhibitor
+      context.
+
+  - id: pneumo-pa-adolescent-soliris-003
+    description: Adolescent on Soliris, no prior pneumo
+    question: >-
+      My patient is 14 years old and recently started Soliris. No prior
+      pneumococcal vaccines. What do I give?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway A — No or unknown prior pneumococcal vaccination"
+          - "Age 6–18 years"
+    tags: [pneumococcal, pathway_a, adolescent, brand_name, standard, easy]
+
+  - id: pneumo-pa-adult-serotype4-region-004
+    description: Adult in Alaska — should surface serotype 4 regional caveat
+    question: >-
+      I have a 55-year-old patient on complement inhibitor therapy in
+      Anchorage, Alaska. They have never been vaccinated for pneumococcal
+      disease. Which PCV should I choose given regional considerations?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway A — No or unknown prior pneumococcal vaccination"
+          - "Age ≥19 years"
+    tags: [pneumococcal, pathway_a, adult, regional, hard]
+    notes: |
+      The serotype 4 regional caveat is part of the ≥19 leaf. This case checks
+      whether the chunker keeps the regional caveat WITH the main recommendation
+      (good) or splits them into separate chunks (bad — caller may miss it).
+
+  # ===========================================================================
+  # PNEUMOCOCCAL — Pathway B (known prior vaccine)
+  # ===========================================================================
+
+  - id: pneumo-pb-pcv13-only-adult-005
+    description: Adult with PCV13 only as a child, never got PPSV23
+    question: >-
+      My patient is 35 years old on iptacopan for PNH. Records show they
+      completed the PCV13 series as a child but never received PPSV23. What
+      should I administer next?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway B — Prior pneumococcal vaccination (known vaccine)"
+          - "Prior vaccine: PCV13 (Prevnar 13) only"
+          - "Age ≥19 years"
+    tags: [pneumococcal, pathway_b, adult, generic_name, standard, medium]
+    notes: |
+      Tests resolving "iptacopan" → complement inhibitor and disambiguating PCV13
+      from other prior vaccines.
+
+  - id: pneumo-pb-pcv20-complete-series-006
+    description: Adult who already got PCV20 — series should be complete
+    question: >-
+      I have an adult patient on Soliris who received PCV20 last year. Do they
+      need any additional pneumococcal vaccines?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway B — Prior pneumococcal vaccination (known vaccine)"
+          - "Prior vaccine: PCV20 (Prevnar 20)"
+          - "Age ≥19 years"
+    tags: [pneumococcal, pathway_b, adult, brand_name, complete_series, medium]
+    notes: |
+      "Complete series" cases are deceptively hard. The leaf is short — just
+      "no further vaccines needed" — which makes it embed close to other
+      "complete" leaves (PCV13+2, PCV15+2). Watch top-1 vs top-3 carefully.
+
+  - id: pneumo-pb-ppsv23-only-elderly-007
+    description: Older adult who previously had only PPSV23
+    question: >-
+      A 65-year-old on eculizumab previously received only PPSV23 about 3
+      years ago. What is recommended now?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway B — Prior pneumococcal vaccination (known vaccine)"
+          - "Prior vaccine: PPSV23 (Pneumovax 23)"
+          - "Age ≥19 years"
+    tags: [pneumococcal, pathway_b, elderly, brand_name, standard, medium]
+    notes: |
+      The ≥19 PPSV23 leaf contains both the general adult guidance AND the
+      ≥65 shared clinical decision-making note. Good test for chunking — both
+      pieces should stay together.
+
+  - id: pneumo-pb-pcv13-plus-1ppsv23-adult-008
+    description: Adult with PCV13 + one PPSV23 prior
+    question: >-
+      My 40-year-old patient on complement inhibitor therapy has prior PCV13
+      plus one dose of Pneumovax 23 documented. What comes next?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway B — Prior pneumococcal vaccination (known vaccine)"
+          - "Prior vaccine: PCV13 + one dose PPSV23"
+          - "Age ≥19 years"
+    tags: [pneumococcal, pathway_b, adult, generic_name, standard, medium]
+
+  - id: pneumo-pb-pcv13-plus-2ppsv23-complete-009
+    description: PCV13 + 2 PPSV23 (5y apart) — series complete, all ages
+    question: >-
+      Patient on ravulizumab. Had PCV13 as a child, then PPSV23, then a second
+      PPSV23 six years after the first. Are their pneumococcal vaccines complete?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway B — Prior pneumococcal vaccination (known vaccine)"
+          - "Prior vaccine: PCV13 + two doses PPSV23 (5 years apart)"
+          - "All ages"
+    tags: [pneumococcal, pathway_b, all_ages, generic_name, complete_series, hard]
+    notes: |
+      Tests retrieval of an "All ages" leaf — these are unusual structurally
+      (no age in breadcrumb) and may behave differently in retrieval.
+
+  - id: pneumo-pb-pcv15-only-adult-010
+    description: Adult with PCV15 only, no PPSV23
+    question: >-
+      32-year-old patient on Soliris received PCV15 last year, no PPSV23 yet.
+      What is the recommendation?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway B — Prior pneumococcal vaccination (known vaccine)"
+          - "Prior vaccine: PCV15 (Vaxneuvance) only"
+          - "Age ≥19 years"
+    tags: [pneumococcal, pathway_b, adult, brand_name, standard, medium]
+
+  - id: pneumo-pb-pcv15-plus-1ppsv23-child-011
+    description: Child with PCV15 series + 1 PPSV23
+    question: >-
+      A 4-year-old on complement inhibitor therapy completed the PCV15 series
+      and has had one PPSV23. What is next?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway B — Prior pneumococcal vaccination (known vaccine)"
+          - "Prior vaccine: PCV15 + one dose PPSV23"
+          - "Age ≤5 years"
+    tags: [pneumococcal, pathway_b, pediatric, generic_name, standard, hard]
+    notes: |
+      Pediatric Pathway B questions are hard — many similar-looking leaves with
+      different dose-count nuances. Top-1 may struggle; top-3 should hit.
+
+  - id: pneumo-pb-pcv7-data-warning-012
+    description: PCV7 documented — should retrieve data-validation guidance
+    question: >-
+      Patient's record shows they received PCV7 at age 3. Patient is now 7
+      years old. What should I do?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway B — Prior pneumococcal vaccination (known vaccine)"
+          - "Prior vaccine: PCV7 (Prevnar)"
+          - "Age 6–19 years"
+    tags: [pneumococcal, pathway_b, adolescent, data_validation, medium]
+    notes: |
+      PCV7 was discontinued in 2010 — the 6–19 leaf gives guidance for the
+      (rare, legitimate) case where this child actually did receive PCV7
+      historically. Note the ≤5 leaf is a different "this can't be right"
+      warning; the runner should be strict about which leaf comes back.
+
+  - id: pneumo-pb-pcv21-child-error-013
+    description: PCV21 in young child — should retrieve "not approved for children"
+    question: >-
+      Records show a 4-year-old received CAPVAXIVE. Is that appropriate?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway B — Prior pneumococcal vaccination (known vaccine)"
+          - "Prior vaccine: PCV21 (CAPVAXIVE)"
+          - "Age ≤5 years"
+    tags: [pneumococcal, pathway_b, pediatric, data_validation, medium]
+    notes: |
+      Tests retrieval of an error-catching/warning leaf — these are short and
+      may rank poorly against more substantive leaves.
+
+  # ===========================================================================
+  # MENINGOCOCCAL — Pathway A
+  # ===========================================================================
+
+  - id: meningo-pa-adolescent-eculizumab-014
+    description: Adolescent ≥10 starting eculizumab, full vaccination plan
+    question: >-
+      A 16-year-old is being started on eculizumab. No prior meningococcal
+      vaccines. What is the full vaccination plan?
+    expected_chunks:
+      - doc_id: nephrovax-meningococcal-2026-02
+        breadcrumb:
+          - "Pathway A — No or unknown prior meningococcal vaccination"
+          - "Age ≥10 years"
+    tags: [meningococcal, pathway_a, adolescent, brand_name, standard, easy]
+    notes: |
+      ≥10 years requires BOTH MenACWY and MenB (or MenABCWY). The single leaf
+      contains the entire combined schedule — chunking must preserve it.
+
+  - id: meningo-pa-young-child-015
+    description: 5-year-old starting complement inhibitor
+    question: >-
+      A 5-year-old initiating complement inhibitor therapy. No prior
+      meningococcal vaccines. What is recommended?
+    expected_chunks:
+      - doc_id: nephrovax-meningococcal-2026-02
+        breadcrumb:
+          - "Pathway A — No or unknown prior meningococcal vaccination"
+          - "Age 2–9 years"
+    tags: [meningococcal, pathway_a, pediatric, generic_name, standard, easy]
+    notes: |
+      Important: in this age band, MenB is NOT in ACIP recommendations. The
+      retrieved leaf must contain this exclusion, otherwise the generated
+      answer might incorrectly add MenB.
+
+  - id: meningo-pa-infant-016
+    description: Infant starting eculizumab
+    question: >-
+      A 6-month-old with aHUS is starting eculizumab. No vaccines yet. What
+      meningococcal vaccines do they need?
+    expected_chunks:
+      - doc_id: nephrovax-meningococcal-2026-02
+        breadcrumb:
+          - "Pathway A — No or unknown prior meningococcal vaccination"
+          - "Age <2 years (2–23 months)"
+    tags: [meningococcal, pathway_a, infant, brand_name, standard, medium]
+    notes: |
+      The leaf for <2 years contains multiple sub-schedules depending on the
+      age at initiation (2 months vs 3–6 months vs 7–23 months). Generation
+      will need to pick the right sub-schedule from a single retrieved chunk —
+      verify the chunk includes ALL three sub-schedules.
+
+  # ===========================================================================
+  # MENINGOCOCCAL — Pathway B
+  # ===========================================================================
+
+  - id: meningo-pb-menacwy-only-adult-017
+    description: Adult who had MenACWY only as adolescent, now needs MenB catch-up
+    question: >-
+      A 21-year-old is now on Ultomiris. She received MenACWY when she was 12
+      but never got MenB. What is the catch-up plan?
+    expected_chunks:
+      - doc_id: nephrovax-meningococcal-2026-02
+        breadcrumb:
+          - "Pathway B — Prior meningococcal vaccination (known vaccine)"
+          - "Prior vaccine: MenACWY (any)"
+          - "Age ≥10 years"
+    tags: [meningococcal, pathway_b, adult, brand_name, standard, medium]
+    notes: |
+      The leaf must cover BOTH continuing MenACWY boosters AND initiating a
+      full MenB series. Tests whether complex multi-action recommendations
+      stay together in one chunk.
+
+  - id: meningo-pb-penbraya-018
+    description: Patient received combined MenABCWY (Penbraya)
+    question: >-
+      An 18-year-old on Soliris received two doses of Penbraya 6 months apart
+      last year. What is the booster schedule?
+    expected_chunks:
+      - doc_id: nephrovax-meningococcal-2026-02
+        breadcrumb:
+          - "Pathway B — Prior meningococcal vaccination (known vaccine)"
+          - "Prior vaccine: Combined MenACWY-TT/MenB-FHbp (Penbraya) or MenACWY-CRM/MenB-4C (Penmenvy)"
+          - "Age ≥10 years"
+    tags: [meningococcal, pathway_b, adolescent, brand_name, standard, hard]
+    notes: |
+      The breadcrumb is unusually long because the prior-vaccine heading covers
+      both Penbraya and Penmenvy. Tests breadcrumb robustness — if your runner
+      truncates breadcrumbs, this will silently fail.
+
+  # ===========================================================================
+  # HIB
+  # ===========================================================================
+
+  - id: hib-pa-adult-019
+    description: Adult on complement inhibitor, no Hib history — NephroVax extension
+    question: >-
+      A 27-year-old is starting eculizumab. No record of Hib vaccination.
+      Should I give Hib?
+    expected_chunks:
+      - doc_id: nephrovax-hib-2026-02
+        breadcrumb:
+          - "Pathway A — No or unknown prior Hib vaccination"
+          - "Age ≥5 years"
+    tags: [hib, pathway_a, adult, brand_name, standard, medium]
+    notes: |
+      Reminder: CDC's adult Hib indications are narrower than what NephroVax
+      recommends. The retrieved leaf reflects the NephroVax interpretation,
+      not CDC's literal text. If/when this is reviewed by clinicians, the
+      retrieved chunk should make the basis clear.
+
+  - id: hib-pb-child-partial-doses-020
+    description: Young child with partial Hib history, starting complement inhibitor
+    question: >-
+      An 8-month-old is starting on complement inhibitor and has had 2 Hib
+      doses so far. Do they need additional doses?
+    expected_chunks:
+      - doc_id: nephrovax-hib-2026-02
+        breadcrumb:
+          - "Pathway B — Prior Hib vaccination"
+          - "Age <5 years"
+    tags: [hib, pathway_b, infant, generic_name, standard, medium]
+
+  # ===========================================================================
+  # HARD CASES — cross-document, paraphrase robustness, negative
+  # ===========================================================================
+
+  - id: multi-vaccine-new-adult-021
+    description: New adult on eculizumab — all three guidelines should fire
+    question: >-
+      I have a 40-year-old patient with no prior vaccines who is starting
+      eculizumab next week. Walk me through the complete vaccination plan.
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway A — No or unknown prior pneumococcal vaccination"
+          - "Age ≥19 years"
+      - doc_id: nephrovax-meningococcal-2026-02
+        breadcrumb:
+          - "Pathway A — No or unknown prior meningococcal vaccination"
+          - "Age ≥10 years"
+      - doc_id: nephrovax-hib-2026-02
+        breadcrumb:
+          - "Pathway A — No or unknown prior Hib vaccination"
+          - "Age ≥5 years"
+    tags: [cross_document, adult, brand_name, hard]
+    success_metric: full_coverage_top_5
+    notes: |
+      Multi-chunk question across all three guidelines. Tests whether
+      retrieval surfaces leaves from multiple documents in one query, and
+      whether top-K is large enough to cover them. If only 1–2 of the 3
+      come back in top-5, you may need a larger K or query expansion.
+
+  - id: paraphrase-c5-inhibitor-022
+    description: Same as 001 but using "C5 inhibitor" terminology instead of brand
+    question: >-
+      What pneumococcal vaccines does an immunocompromised adult need before
+      starting C5 complement inhibitor therapy?
+    expected_chunks:
+      - doc_id: nephrovax-pneumococcal-2026-02
+        breadcrumb:
+          - "Pathway A — No or unknown prior pneumococcal vaccination"
+          - "Age ≥19 years"
+    tags: [pneumococcal, pathway_a, adult, generic_name, paraphrase, medium]
+    notes: |
+      Pair with case 001 to measure embedding robustness to terminology
+      variation. If 001 passes but this fails, your embedding is too
+      surface-level on brand names. Voyage embeddings handle this well in
+      our experience but verify empirically.
+
+  - id: out-of-scope-hepb-023
+    description: Negative case — hepatitis B is out of scope
+    question: >-
+      What is the recommended hepatitis B vaccination schedule for adults
+      on dialysis?
+    expected_chunks: []
+    tags: [negative, out_of_scope]
+    success_metric: top_score_below_threshold
+    notes: |
+      No leaf should match strongly. The runner should check that the top
+      retrieved chunk's similarity score is below `negative_case_max_score`.
+      If retrieval returns a high-confidence pneumococcal-dialysis chunk,
+      the system is over-eager — likely to hallucinate in production.
+      Tune threshold empirically; if too strict, you'll reject legitimate
+      borderline queries.
